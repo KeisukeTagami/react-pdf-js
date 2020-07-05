@@ -1,4 +1,6 @@
-import pdfjs from '@bundled-es-modules/pdfjs-dist';
+// import pdfjs from '@bundled-es-modules/pdfjs-dist';
+import pdfjs from '@bundled-es-modules/pdfjs-dist/build/pdf';
+import {} from '@bundled-es-modules/pdfjs-dist/web/pdf_viewer';
 import React, { useState, useEffect, useRef, useImperativeHandle } from 'react';
 
 function isFunction(value: any): value is Function {
@@ -39,8 +41,16 @@ const Pdf = React.forwardRef<HTMLCanvasElement | null, ComponentProps>(
     const canvasRef = useRef<HTMLCanvasElement>(null);
     useImperativeHandle(ref, () => canvasRef.current);
 
+    const textLayerRef = useRef<HTMLDivElement>(null);
+    // useImperativeHandle(ref, () => textLayerRef.current);
+
+    const annotationLayerRef = useRef<HTMLDivElement>(null);
+    // useImperativeHandle(ref, () => annotationLayerRef.current);
+
     const pdfData = usePdf({
       canvasRef,
+      textLayerRef,
+      annotationLayerRef,
       file,
       onDocumentLoadSuccess,
       onDocumentLoadFail,
@@ -69,12 +79,17 @@ const Pdf = React.forwardRef<HTMLCanvasElement | null, ComponentProps>(
 
 type HookProps = {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  textLayerRef?: React.RefObject<HTMLDivElement | null>;
+  annotationLayerRef?: React.RefObject<HTMLDivElement | null>;
   file: string;
   onDocumentLoadSuccess?: (document: pdfjs.PDFDocumentProxy) => void;
   onDocumentLoadFail?: () => void;
   onPageLoadSuccess?: (page: pdfjs.PDFPageProxy) => void;
   onPageLoadFail?: () => void;
-  onPageRenderSuccess?: (page: pdfjs.PDFPageProxy) => void;
+  onPageRenderSuccess?: (
+    page: pdfjs.PDFPageProxy,
+    viewport: pdfjs.PageViewPort
+  ) => void;
   onPageRenderFail?: () => void;
   scale?: number;
   rotate?: number;
@@ -92,6 +107,8 @@ type HookReturnValues = {
 
 export const usePdf = ({
   canvasRef,
+  textLayerRef,
+  annotationLayerRef,
   file,
   onDocumentLoadSuccess,
   onDocumentLoadFail,
@@ -178,7 +195,13 @@ export const usePdf = ({
       const adjustedScale = scale * dpRatio;
       const viewport = page.getViewport({ scale: adjustedScale, rotation });
       const canvasEl = canvasRef.current;
+      const textLayerEl = textLayerRef?.current;
+      const annotationLayerEl = annotationLayerRef?.current;
       if (!canvasEl) {
+        return;
+      }
+
+      if (!textLayerEl) {
         return;
       }
 
@@ -203,25 +226,75 @@ export const usePdf = ({
         viewport,
       });
 
-      return renderTask.current.promise.then(
-        () => {
-          renderTask.current = null;
+      const drawTextLayer = textContent => {
+        while (textLayerEl.firstChild) {
+          textLayerEl.firstChild.remove();
+        }
 
-          if (isFunction(onPageRenderSuccessRef.current)) {
-            onPageRenderSuccessRef.current(page);
+        // Assign CSS to the text-layer element
+        textLayerEl.style.left = canvasEl.offsetLeft + 'px';
+        textLayerEl.style.top = canvasEl.offsetTop + 'px';
+        textLayerEl.style.height = canvasEl.height + 'px';
+        textLayerEl.style.width = canvasEl.width + 'px';
+
+        // Pass the data to the method for rendering of text over the pdf canvas.
+        pdfjs.renderTextLayer({
+          textContent: textContent,
+          container: textLayerEl,
+          viewport: viewport,
+          textDivs: [],
+        });
+      };
+
+      const drawAnnotationLayer = annotationData => {
+        if (annotationLayerEl) {
+          while (annotationLayerEl.firstChild) {
+            annotationLayerEl.firstChild.remove();
           }
-        },
-        err => {
-          renderTask.current = null;
 
-          // @ts-ignore typings are outdated
-          if (err && err.name === 'RenderingCancelledException') {
-            drawPDF(page);
-          } else if (isFunction(onPageRenderFailRef.current)) {
-            onPageRenderFailRef.current();
+          // Assign CSS to the text-layer element
+          annotationLayerEl.style.left = canvasEl.offsetLeft + 'px';
+          annotationLayerEl.style.top = canvasEl.offsetTop + 'px';
+          annotationLayerEl.style.height = canvasEl.height + 'px';
+          annotationLayerEl.style.width = canvasEl.width + 'px';
+
+          // Pass the data to the method for rendering of text over the pdf canvas.
+          if (undefined !== pdfjs.AnnotationLayer.linkService) {
+            pdfjs.AnnotationLayer.render({
+              viewport: viewport.clone({ dontFlip: true }),
+              div: annotationLayerEl,
+              annotations: annotationData,
+              page: page,
+            });
           }
         }
-      );
+      };
+
+      return renderTask.current.promise
+        .then(() => {
+          return Promise.all([page.getTextContent(), page.getAnnotations()]);
+        })
+        .then(
+          ([textContext, annotationData]) => {
+            drawTextLayer(textContext);
+            drawAnnotationLayer(annotationData);
+
+            if (isFunction(onPageRenderSuccessRef.current)) {
+              onPageRenderSuccessRef.current(page, viewport);
+            }
+            renderTask.current = null;
+          },
+          err => {
+            renderTask.current = null;
+
+            // @ts-ignore typings are outdated
+            if (err && err.name === 'RenderingCancelledException') {
+              drawPDF(page);
+            } else if (isFunction(onPageRenderFailRef.current)) {
+              onPageRenderFailRef.current();
+            }
+          }
+        );
     };
 
     if (pdfDocument) {
@@ -242,7 +315,15 @@ export const usePdf = ({
         }
       );
     }
-  }, [canvasRef, page, pdfDocument, rotate, scale]);
+  }, [
+    canvasRef,
+    textLayerRef,
+    annotationLayerRef,
+    page,
+    pdfDocument,
+    rotate,
+    scale,
+  ]);
 
   return { pdfDocument, pdfPage };
 };
